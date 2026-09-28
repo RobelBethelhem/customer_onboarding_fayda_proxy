@@ -637,6 +637,11 @@ if (req.body.dateOfBirth) {
       faceVideoId: customerData.faceVideoId || '',
       // Referral tracking — forward referral code to dashboard for reward distribution
       referralCode: customerData.referralCode || '',
+      // Existing customer — CIF (or 16-digit account number) they already hold. The dashboard
+      // verifies it and, on approval, opens only a new account under that CIF.
+      existingCustomer: !!customerData.existingCustomer,
+      existingCif: customerData.existingCif || '',
+      existingAccountNumber: customerData.existingAccountNumber || '',
       // FlexCube UDF fields
       promotionType: customerData.promotionType || 'Walk in customer',
       customerSegmentation: customerData.customerSegmentation || 'RETAIL CUSTOMER',
@@ -717,8 +722,23 @@ if (req.body.dateOfBirth) {
   } catch (error) {
     console.error('Create customer error:', error.message);
 
+    // Customer Onboarding API rejected the application (e.g. CIF not found) — pass its reason on
+    if (error.response && error.response.status >= 400 && error.response.status < 500) {
+      return res.status(error.response.status).json({
+        success: false,
+        message: error.response.data?.error || 'Application could not be submitted',
+      });
+    }
+
     // If Customer Onboarding API is not available, fall back to direct FlexCube
     if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+      // Never for an existing customer — the fallback would create them a second CIF
+      if (req.body.existingCustomer || req.body.existingCif || req.body.existingAccountNumber) {
+        return res.status(503).json({
+          success: false,
+          message: 'Account opening is temporarily unavailable. Please try again shortly.',
+        });
+      }
       console.log('Customer Onboarding API not available, falling back to direct FlexCube...');
 
       try {
