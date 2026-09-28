@@ -279,14 +279,21 @@ const flexcubeRoutes = require('./routes/flexcube');
 const harmonizationRoutes = require('./routes/harmonization');
 const adminRoutes = require('./routes/admin');
 const faceVerificationRoutes = require('./routes/faceVerification');
+const { globalRateLimit, trustProxySetting } = require('./middleware/rateLimit');
+const { forwardedForHeader } = require('./lib/clientIp');
 require('dotenv').config();
 
 const app = express();
 
 const PORT = process.env.PORT || 5000;
 
+// Behind nginx: take the client IP from X-Forwarded-For (TRUST_PROXY, default one proxy hop),
+// so rate limits apply per customer rather than to nginx's address
+app.set('trust proxy', trustProxySetting());
+
 // Middleware
 app.use(cors());
+app.use(globalRateLimit); // 100 requests / minute per client IP (RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS)
 app.use(express.json({ limit: '50mb' }));
 
 // Fayda connectivity test
@@ -328,7 +335,7 @@ const txnStore = new Map();
         `${CUSTOMER_ONBOARDING_API}/api/screening/check`,
         { firstName, middleName, lastName, dateOfBirth, nationality },
         {
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...forwardedForHeader(req) },
           timeout: 30000,
         }
       );

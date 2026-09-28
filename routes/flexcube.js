@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const { executeQuery } = require('../lib/oracleDb');
+const { forwardedForHeader } = require('../lib/clientIp');
 
 const DB_SHEMA = process.env.FLEXCUBE_DB_SCHEMA || 'FCUBSPRD';
 
@@ -678,7 +679,7 @@ if (req.body.dateOfBirth) {
     // Call Customer Onboarding API - this will check workflow settings
     // Large timeout + body limits because payload includes base64 photos (can be 10MB+)
     const onboardingResponse = await axios.post(`${CUSTOMER_ONBOARDING_API}/api/onboarding`, onboardingData, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...forwardedForHeader(req) },
       timeout: 120000,            // 2 minutes
       maxContentLength: 50 * 1024 * 1024,  // 50MB
       maxBodyLength: 50 * 1024 * 1024,     // 50MB
