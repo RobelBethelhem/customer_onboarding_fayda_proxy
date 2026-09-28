@@ -642,6 +642,8 @@ if (req.body.dateOfBirth) {
       existingCustomer: !!customerData.existingCustomer,
       existingCif: customerData.existingCif || '',
       existingAccountNumber: customerData.existingAccountNumber || '',
+      // Mobile Banking / Internet Banking / Debit Card — set up by the branch Personal Banker after approval
+      requestedServices: Array.isArray(customerData.requestedServices) ? customerData.requestedServices : [],
       // FlexCube UDF fields
       promotionType: customerData.promotionType || 'Walk in customer',
       customerSegmentation: customerData.customerSegmentation || 'RETAIL CUSTOMER',
