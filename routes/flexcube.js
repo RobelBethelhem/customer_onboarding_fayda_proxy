@@ -738,7 +738,10 @@ if (req.body.dateOfBirth) {
     });
 
   } catch (error) {
-    console.error('Create customer error:', error.message);
+    // The dashboard's own reason (e.g. { error, detail }) — without it a 500 says nothing
+    const dashboardReply = error.response && error.response.data;
+    console.error('Create customer error:', error.message,
+      dashboardReply ? `| dashboard said: ${JSON.stringify(dashboardReply).slice(0, 600)}` : '');
 
     // Customer Onboarding API rejected the application (e.g. CIF not found) — pass its reason on
     if (error.response && error.response.status >= 400 && error.response.status < 500) {
@@ -795,7 +798,7 @@ if (req.body.dateOfBirth) {
     res.status(500).json({
       success: false,
       message: 'Failed to process customer request',
-      error: error.message
+      error: (dashboardReply && (dashboardReply.detail || dashboardReply.error)) || error.message
     });
   }
 });
