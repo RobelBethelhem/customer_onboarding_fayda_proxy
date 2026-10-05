@@ -6,11 +6,14 @@
  * POST /api/face/compare - Compare two faces
  * POST /api/face/liveness - Check liveness challenge
  * POST /api/face/verify - Full verification (detect + compare)
+ * POST /api/face/verify-liveness - Web app live check: actions + anti-spoof + match (signed result)
  */
 
 const express = require('express');
 const router = express.Router();
 const faceApi = require('../services/faceApiService');
+const liveness = require('../services/livenessService');
+const faceResult = require('../lib/faceResult');
 const fs = require('fs');
 const path = require('path');
 
@@ -328,6 +331,87 @@ router.post('/occlusion', async (req, res) => {
  * }
  * Returns: { success: boolean, videoId: string, message: string }
  */
+// What to tell the customer when the live check or the match does not pass
+function livenessMessage(result) {
+  const l = result.liveness;
+  if (!l.passed) {
+    switch (l.failed) {
+      case 'one_face':
+        return /More than one/.test(l.reason || '')
+          ? 'Only you should be in front of the camera. Please try again.'
+          : 'We could not see your face clearly. Face the camera in good light and try again.';
+      case 'mouth': return 'We could not confirm that you opened your mouth. Please try again.';
+      case 'turn': return 'We could not confirm the head turn. Turn your head clearly to one side and try again.';
+      case 'same_person': return 'Your face changed during the check. Please try again with only you in view.';
+      case 'anti_spoof': return 'We could not confirm a live person. Use your own face, not a photo or a screen, in good light.';
+      default: return 'The live check did not pass. Please try again.';
+    }
+  }
+  if (!result.match) return 'We could not compare your face with your Fayda ID photo.';
+  return result.match.matched ? 'Face verified' : 'Your face does not match your Fayda ID photo.';
+}
+
+const MAX_IMAGE_CHARS = 3 * 1024 * 1024; // base64 per image
+
+/**
+ * POST /api/face/verify-liveness
+ * The web app's live check, verified on the server: the browser guided the customer through the
+ * actions (open mouth, turn head) and sends the frames it captured; this checks them again, runs
+ * the anti-spoof model and compares the faces with the Fayda photo — in a worker thread.
+ *
+ * Body: {
+ *   selfie: string (base64 JPEG, neutral, facing the camera),
+ *   frames: [{ action: 'mouth' | 'turn', image: string (base64 JPEG) }],
+ *   faydaPhoto: string (base64 JPEG from eKYC)
+ * }
+ * Returns: { success, passed, matched, similarity, antiSpoofScore, failed, message, token }
+ * `token` (signed) is sent with the application; the dashboard gets the server's result from it.
+ */
+router.post('/verify-liveness', async (req, res) => {
+  const { selfie, frames, faydaPhoto } = req.body || {};
+  const okImage = (s) => typeof s === 'string' && s.length > 100 && s.length < MAX_IMAGE_CHARS;
+  if (!okImage(selfie)) {
+    return res.status(400).json({ success: false, message: 'A selfie image is required' });
+  }
+  if (!Array.isArray(frames) || frames.length < 1 || frames.length > 4 ||
+      !frames.every(f => f && ['mouth', 'turn'].includes(f.action) && okImage(f.image))) {
+    return res.status(400).json({ success: false, message: 'frames must be 1-4 images with action "mouth" or "turn"' });
+  }
+  if (faydaPhoto !== undefined && faydaPhoto !== '' && !okImage(faydaPhoto)) {
+    return res.status(400).json({ success: false, message: 'Invalid Fayda photo' });
+  }
+
+  try {
+    const clean = faceResult.clean;
+    const input = {
+      selfie: clean(selfie),
+      frames: frames.map(f => ({ action: f.action, image: clean(f.image) })),
+      faydaPhoto: faydaPhoto ? clean(faydaPhoto) : '',
+    };
+    const result = await liveness.verify(input);
+    const message = livenessMessage(result);
+    console.log(`[Liveness] passed=${result.liveness.passed}${result.liveness.failed ? ` (${result.liveness.failed})` : ''}` +
+      ` match=${result.match ? `${result.match.similarity}% ${result.match.matched ? 'yes' : 'no'}` : result.matchError}` +
+      ` antiSpoof=${result.liveness.antiSpoof ? result.liveness.antiSpoof.score : 'n/a'} (${result.ms} ms)`);
+    res.json({
+      success: true,
+      passed: result.liveness.passed,
+      matched: !!(result.match && result.match.matched),
+      similarity: result.match ? result.match.similarity : null,
+      antiSpoofScore: result.liveness.antiSpoof ? result.liveness.antiSpoof.score : null,
+      failed: result.liveness.failed || null,
+      message,
+      token: faceResult.sign({ ...input, result }),
+    });
+  } catch (error) {
+    console.error('[Liveness] Check failed:', error.message);
+    res.status(503).json({
+      success: false,
+      message: error.busy ? 'Many people are verifying right now. Please try again in a minute.' : 'The face check is not available right now. Please try again.',
+    });
+  }
+});
+
 router.post('/upload-video', async (req, res) => {
   try {
     const { video, selfiePhoto, videoMimeType, videoSizeBytes } = req.body;

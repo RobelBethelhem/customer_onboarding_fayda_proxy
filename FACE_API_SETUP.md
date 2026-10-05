@@ -1,5 +1,18 @@
 # Face-API.js Integration Setup Guide
 
+> **Web app live check (`POST /api/face/verify-liveness`)** — the browser guides the customer (open
+> mouth, turn head) and sends the frames; `services/livenessWorker.js` re-checks them in a worker
+> thread (tiny face detector + 68 landmarks + face recognition, so the server is not blocked), runs
+> the MiniFASNet anti-spoof model (`models/antispoof`, see its README) and compares with the Fayda
+> photo. The result is signed (`lib/faceResult.js`, key `FACE_RESULT_SECRET`, else `JWT_SECRET`);
+> `/api/flexcube/create-customer` forwards the verdict to the dashboard only for the same selfie and
+> Fayda photo — otherwise a web application gets its faces compared at submission, liveness
+> "not verified". Needs `onnxruntime-node` (`npm install`) for the anti-spoof score.
+>
+> Settings (`.env`, optional): `ANTISPOOF_ENFORCE=true` and `ANTISPOOF_THRESHOLD=0.5` to block on
+> the anti-spoof score (default: recorded only), `FACE_RESULT_SECRET`, `FACE_CHECK_TIMEOUT_MS`
+> (120000), `FACE_CHECK_MAX_QUEUE` (20).
+
 This guide explains how to set up the free face-api.js face recognition system for the Zemen Bank app.
 
 ## Overview

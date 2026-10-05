@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const { executeQuery } = require('../lib/oracleDb');
 const { forwardedForHeader } = require('../lib/clientIp');
+const faceResult = require('../lib/faceResult');
 
 const DB_SHEMA = process.env.FLEXCUBE_DB_SCHEMA || 'FCUBSPRD';
 
@@ -643,8 +644,13 @@ if (req.body.dateOfBirth) {
       existingCustomer: !!customerData.existingCustomer,
       existingCif: customerData.existingCif || '',
       existingAccountNumber: customerData.existingAccountNumber || '',
-      // Mobile Banking / Internet Banking / Debit Card — set up by the branch Personal Banker after approval
+      // Additional services (Mobile Banking, Debit Card …) — set up by the branch Personal Banker after approval
       requestedServices: Array.isArray(customerData.requestedServices) ? customerData.requestedServices : [],
+      // Terms and conditions of those services the customer accepted: [{ id, version, acceptedAt }]
+      serviceTermsAccepted: (Array.isArray(customerData.serviceTermsAccepted) ? customerData.serviceTermsAccepted : [])
+        .slice(0, 20)
+        .filter(a => a && typeof a.id === 'string')
+        .map(a => ({ id: a.id, version: Number(a.version) || 0, acceptedAt: String(a.acceptedAt || '') })),
       // FlexCube UDF fields
       promotionType: customerData.promotionType || 'Walk in customer',
       customerSegmentation: customerData.customerSegmentation || 'RETAIL CUSTOMER',
@@ -673,6 +679,15 @@ if (req.body.dateOfBirth) {
       kebele: onboardingData.kebele,
       houseNumber: onboardingData.houseNumber
     });
+
+    // Web app face check: the result this server signed for this selfie (never a score the browser
+    // sends); a web application without one gets its faces compared now, liveness "not verified"
+    try {
+      const face = await faceResult.forApplication(customerData);
+      if (face) Object.assign(onboardingData, face);
+    } catch (e) {
+      console.error('[Face] Could not attach the face check result:', e.message);
+    }
 
     console.log('Sending customer data to Customer Onboarding API...');
 
