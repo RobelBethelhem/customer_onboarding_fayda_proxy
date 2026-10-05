@@ -36,3 +36,5 @@ uploads/
 __pycache__/
 *.pyc
 
+# Key that signs face check results (made on first use)
+.face-result-secret
