@@ -1,7 +1,8 @@
 /**
  * Business account applications from the web app, passed on to the Customer Onboarding
  * dashboard's public corporate API (/api/corporate/public/*): organization types and documents,
- * file uploads, submission, the applicant's status page and the SMS verification links.
+ * file uploads, signatories/directors verifying while the form is filled in, submission, the
+ * applicant's status page and the SMS verification links.
  * The dashboard checks everything itself; this only relays (the web app reaches the dashboard
  * through this server, like the rest of the onboarding).
  */
@@ -15,7 +16,7 @@ const router = express.Router();
 const dashboard = () => (process.env.CUSTOMER_ONBOARDING_API || 'http://localhost:3500').replace(/\/+$/, '');
 
 // The only paths the web app needs
-const ALLOWED = /^\/(catalog|files|applications|applications\/[A-Za-z0-9-]{1,20}|invites\/[A-Za-z0-9_-]{20,100})$/;
+const ALLOWED = /^\/(catalog|files|applications|applications\/[A-Za-z0-9-]{1,20}|verifications|verifications\/[A-Za-z0-9-]{1,40}|invites\/[A-Za-z0-9_-]{20,100})$/;
 
 router.use(async (req, res) => {
   if (req.method !== 'GET' && req.method !== 'POST') {
