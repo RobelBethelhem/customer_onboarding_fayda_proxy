@@ -279,8 +279,11 @@ const flexcubeRoutes = require('./routes/flexcube');
 const harmonizationRoutes = require('./routes/harmonization');
 const adminRoutes = require('./routes/admin');
 const faceVerificationRoutes = require('./routes/faceVerification');
+const corporateRoutes = require('./routes/corporate');
 const { globalRateLimit, trustProxySetting } = require('./middleware/rateLimit');
 const { forwardedForHeader } = require('./lib/clientIp');
+const faceResult = require('./lib/faceResult');
+const livenessService = require('./services/livenessService');
 require('dotenv').config();
 
 const app = express();
@@ -506,6 +509,27 @@ app.post('/api/fayda/ekyc', async (req, res) => {
       ekycRes.identity.photo = await convertPhotoToJpeg(ekycRes.identity.photo);
     }
 
+    // Signed copy of the identity for business account applications: the dashboard asks this
+    // server (POST /api/fayda/verify-tokens) whether the data really came from Fayda
+    if (ekycRes?.identity) {
+      const id = ekycRes.identity;
+      ekycRes.ekycToken = faceResult.signPayload({
+        t: 'ekyc',
+        fan: individualId.trim(),
+        uin: ekycRes.psut || '',
+        name: id.name_eng || '',
+        nameAmh: id.name_amh || '',
+        dob: id.dob || '',
+        gender: id.gender_eng || '',
+        phone: id.phone || '',
+        email: id.email || '',
+        region: id.region_eng || '',
+        zone: id.zone_eng || '',
+        woreda: id.woreda_eng || '',
+        ph: faceResult.hash(id.photo || ''),
+      });
+    }
+
     res.json(ekycRes);
   } catch (err) {
     console.error('Fayda ekyc error:', err?.message || err);
@@ -520,7 +544,37 @@ app.post('/api/fayda/ekyc', async (req, res) => {
 
 
 
+/**
+ * POST /api/fayda/verify-tokens — for the Customer Onboarding dashboard (business accounts).
+ * Body: { ekycToken, faceVerificationToken?, selfie?, faydaPhoto? }
+ * Returns what this server signed: the eKYC data and the live face check result. Without a valid
+ * face check result the selfie is compared with the Fayda photo now (liveness not verified).
+ */
+const EKYC_TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // the applicant may finish the form days later
+app.post('/api/fayda/verify-tokens', async (req, res) => {
+  try {
+    const { ekycToken, faceVerificationToken, selfie, faydaPhoto } = req.body || {};
+    const ekyc = ekycToken ? faceResult.verifyPayload(ekycToken, 'ekyc', EKYC_TOKEN_MAX_AGE_MS) : null;
+    const face = faceVerificationToken ? faceResult.verifyToken(faceVerificationToken) : null;
+    let compare;
+    if (ekyc && !face && selfie && faydaPhoto) {
+      try {
+        compare = await livenessService.compare({ selfie: faceResult.clean(selfie), faydaPhoto: faceResult.clean(faydaPhoto) });
+      } catch (e) {
+        compare = { match: null, matchError: `Face comparison failed: ${e.message}` };
+      }
+    }
+    res.json({ success: true, ekyc, face, compare });
+  } catch (err) {
+    console.error('verify-tokens error:', err?.message || err);
+    res.status(500).json({ success: false, message: 'Could not check the tokens' });
+  }
+});
+
 app.use('/api/flexcube', flexcubeRoutes);
+
+// Business account applications (web app) → Customer Onboarding dashboard
+app.use('/api/corporate', corporateRoutes);
 
 // Harmonization routes
 app.use('/api/harmonization', harmonizationRoutes);
