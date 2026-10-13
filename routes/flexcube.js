@@ -656,6 +656,8 @@ if (req.body.dateOfBirth) {
       initialDeposit: customerData.initialDeposit || 0,
       motherMaidenName: customerData.motherMaidenName || '',
       maritalStatus: customerData.maritalStatus || '',
+      // TIN the customer entered (the web app sends it as `tin`)
+      taxIdentity: customerData.taxIdentity || customerData.tin || '',
       // Marriage certificate photo (only for married customers)
       marriageCertificatePhoto: customerData.marriageCertificatePhoto || '',
       // Photos - Fayda ID photo and selfie
