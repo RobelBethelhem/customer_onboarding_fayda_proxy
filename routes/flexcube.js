@@ -277,6 +277,45 @@ router.post('/set-no-debit', async (req, res) => {
 
 
 
+/**
+ * POST /api/flexcube/customer-branch — the web app, when an existing customer gives their CIF (or
+ * account number): their home branch, where the new account is opened.
+ * Body: { cif, accountNumber? }  →  { success, found, branchCode }
+ * Only says whether the customer exists and their branch code (no other customer data).
+ */
+router.post('/customer-branch', async (req, res) => {
+  try {
+    const cif = String(req.body?.cif || '').trim();
+    const accountNumber = String(req.body?.accountNumber || '').trim();
+    if (!/^\d{7}$/.test(cif)) return res.status(400).json({ success: false, found: false, message: 'A 7-digit CIF number is required' });
+    if (accountNumber && !/^\d{16}$/.test(accountNumber)) {
+      return res.status(400).json({ success: false, found: false, message: 'The account number has 16 digits' });
+    }
+    const notFound = () => res.status(404).json({
+      success: false, found: false,
+      message: 'No account was found with this number. Please check it and try again.',
+    });
+
+    // An account number must exist and belong to that CIF
+    if (accountNumber) {
+      const acc = await executeQuery(`SELECT CUST_NO FROM ${DB_SHEMA}.STTM_CUST_ACCOUNT WHERE CUST_AC_NO = :1`, [accountNumber]);
+      if (!acc.success) throw new Error(acc.error || 'Account query failed');
+      if (!acc.data || !acc.data.length || String(acc.data[0].CUST_NO || '').trim() !== cif) return notFound();
+    }
+
+    const result = await executeQuery(`SELECT LOCAL_BRANCH FROM ${DB_SHEMA}.STTM_CUSTOMER WHERE CUSTOMER_NO = :1`, [cif]);
+    if (!result.success) throw new Error(result.error || 'Customer query failed');
+    const branchCode = result.data && result.data.length ? String(result.data[0].LOCAL_BRANCH || '').trim() : '';
+    if (!branchCode) return notFound();
+
+    console.log(`[CustomerBranch] CIF ${cif} → home branch ${branchCode}`);
+    return res.json({ success: true, found: true, branchCode });
+  } catch (error) {
+    console.error('[CustomerBranch] Error:', error.message || error);
+    return res.status(503).json({ success: false, found: false, message: 'We could not check the account right now. Please try again.' });
+  }
+});
+
 router.post('/customer', async (req, res) => {
   try {
     const { accountNumber } = req.body;
