@@ -308,6 +308,36 @@ router.post('/customer-branch', async (req, res) => {
     const branchCode = result.data && result.data.length ? String(result.data[0].LOCAL_BRANCH || '').trim() : '';
     if (!branchCode) return notFound();
 
+    // Any account of the CIF on No-Debit or frozen: no new account online — the customer goes to the branch
+    const restriction = await executeQuery(
+      `SELECT cust_no,
+              TRIM(CASE WHEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) > 0
+                        THEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) || ' account no debit ' ELSE '' END ||
+                   CASE WHEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) > 0
+                        THEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) || ' account frozen' ELSE '' END) AS account_status,
+              COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) AS no_debit_count,
+              COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) AS frozen_count
+         FROM ${DB_SHEMA}.STTM_CUST_ACCOUNT
+        WHERE cust_no = :1
+          AND (ac_stat_no_dr = 'Y' OR ac_stat_frozen = 'Y')
+        GROUP BY cust_no`,
+      [cif]
+    );
+    if (!restriction.success) throw new Error(restriction.error || 'Account status query failed');
+    const row = restriction.data && restriction.data[0];
+    if (row) {
+      const noDebit = Number(row.NO_DEBIT_COUNT) || 0;
+      const frozen = Number(row.FROZEN_COUNT) || 0;
+      const what = [frozen && 'frozen', noDebit && 'on No-Debit'].filter(Boolean).join(' and ');
+      console.log(`[CustomerBranch] CIF ${cif}: ${row.ACCOUNT_STATUS} — new account refused online`);
+      return res.status(409).json({
+        success: false, found: true, restricted: true, branchCode,
+        accountStatus: String(row.ACCOUNT_STATUS || '').trim(), noDebitCount: noDebit, frozenCount: frozen,
+        message: `${noDebit + frozen > 1 ? 'Some of your accounts are' : 'One of your accounts is'} ${what}. `
+          + 'Please visit a Zemen Bank branch to continue.',
+      });
+    }
+
     console.log(`[CustomerBranch] CIF ${cif} → home branch ${branchCode}`);
     return res.json({ success: true, found: true, branchCode });
   } catch (error) {
