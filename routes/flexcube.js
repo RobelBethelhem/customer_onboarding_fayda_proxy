@@ -663,6 +663,9 @@ if (req.body.dateOfBirth) {
       tierId: customerData.tierId || '',
       tierName: customerData.tierName || '',
       tierInterestRate: customerData.tierInterestRate || 0,
+      // Account currency chosen for a foreign currency (FCY) class — USD, GBP, EUR; the dashboard
+      // checks it against the class (other classes are ETB)
+      currency: customerData.currency || '',
       branch: customerData.branch || 'Main Branch',
       branchCode: customerData.branchCode || '',
       uin: customerData.faydaId || customerData.uin || '',
