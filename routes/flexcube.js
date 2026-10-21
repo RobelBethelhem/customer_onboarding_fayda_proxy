@@ -286,34 +286,50 @@ async function homeBranchOf(cif) {
   return result.data && result.data.length ? String(result.data[0].LOCAL_BRANCH || '').trim() : '';
 }
 
+// Account classes the check leaves out: SPFR is the company Provident Fund account of the staff
+const RESTRICTION_EXEMPT_CLASSES = ['SPFR'];
+
 /**
- * Accounts of the CIF on No-Debit or frozen (the bank's query) — then no new account online, the
- * customer goes to the branch. Null when there are none.
+ * Accounts of the CIF on No-Debit, frozen or dormant (the bank's query; Provident Fund accounts
+ * left out) — then no new account online, the customer goes to the branch. Null when there are none.
  */
 async function restrictionOf(cif) {
+  const exempt = RESTRICTION_EXEMPT_CLASSES.map((_, i) => `:${i + 2}`).join(', ');
   const restriction = await executeQuery(
-    `SELECT cust_no,
-            TRIM(CASE WHEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) > 0
-                      THEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) || ' account no debit ' ELSE '' END ||
-                 CASE WHEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) > 0
-                      THEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) || ' account frozen' ELSE '' END) AS account_status,
-            COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) AS no_debit_count,
-            COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) AS frozen_count
-       FROM ${DB_SHEMA}.STTM_CUST_ACCOUNT
-      WHERE cust_no = :1
-        AND (ac_stat_no_dr = 'Y' OR ac_stat_frozen = 'Y')
-      GROUP BY cust_no`,
-    [cif]
+    `SELECT a.cust_no AS cif,
+            RTRIM(
+                 CASE WHEN COUNT(CASE WHEN a.ac_stat_no_dr   = 'Y' THEN 1 END) > 0
+                      THEN COUNT(CASE WHEN a.ac_stat_no_dr   = 'Y' THEN 1 END) || ' account no debit, ' END ||
+                 CASE WHEN COUNT(CASE WHEN a.ac_stat_frozen  = 'Y' THEN 1 END) > 0
+                      THEN COUNT(CASE WHEN a.ac_stat_frozen  = 'Y' THEN 1 END) || ' account frozen, ' END ||
+                 CASE WHEN COUNT(CASE WHEN b.ac_stat_dormant = 'Y' THEN 1 END) > 0
+                      THEN COUNT(CASE WHEN b.ac_stat_dormant = 'Y' THEN 1 END) || ' account dormant, ' END
+            , ', ') AS ac_status,
+            COUNT(CASE WHEN a.ac_stat_no_dr   = 'Y' THEN 1 END) AS no_debit_count,
+            COUNT(CASE WHEN a.ac_stat_frozen  = 'Y' THEN 1 END) AS frozen_count,
+            COUNT(CASE WHEN b.ac_stat_dormant = 'Y' THEN 1 END) AS dormant_count,
+            COUNT(DISTINCT a.cust_ac_no) AS account_count
+       FROM ${DB_SHEMA}.STTM_CUST_ACCOUNT a
+       LEFT JOIN ${DB_SHEMA}.STTB_ACCOUNT b
+              ON a.cust_ac_no = b.ac_gl_no
+      WHERE a.cust_no = :1
+        AND (a.ac_stat_no_dr = 'Y' OR a.ac_stat_frozen = 'Y' OR b.ac_stat_dormant = 'Y')
+        AND a.account_class NOT IN (${exempt})
+      GROUP BY a.cust_no`,
+    [cif, ...RESTRICTION_EXEMPT_CLASSES]
   );
   if (!restriction.success) throw new Error(restriction.error || 'Account status query failed');
   const row = restriction.data && restriction.data[0];
   if (!row) return null;
   const noDebit = Number(row.NO_DEBIT_COUNT) || 0;
   const frozen = Number(row.FROZEN_COUNT) || 0;
-  const what = [frozen && 'frozen', noDebit && 'on No-Debit'].filter(Boolean).join(' and ');
+  const dormant = Number(row.DORMANT_COUNT) || 0;
+  const accounts = Number(row.ACCOUNT_COUNT) || noDebit + frozen + dormant;
+  const states = [frozen && 'frozen', dormant && 'dormant', noDebit && 'on No-Debit'].filter(Boolean);
+  const list = conj => (states.length > 1 ? `${states.slice(0, -1).join(', ')} ${conj} ${states[states.length - 1]}` : states[0]);
   return {
-    accountStatus: String(row.ACCOUNT_STATUS || '').trim(), noDebitCount: noDebit, frozenCount: frozen,
-    message: `${noDebit + frozen > 1 ? 'Some of your accounts are' : 'One of your accounts is'} ${what}. `
+    accountStatus: String(row.AC_STATUS || '').trim(), noDebitCount: noDebit, frozenCount: frozen, dormantCount: dormant,
+    message: `${accounts > 1 ? `Some of your accounts are ${list('or')}` : `One of your accounts is ${list('and')}`}. `
       + 'Please visit a Zemen Bank branch to continue.',
   };
 }
@@ -397,7 +413,8 @@ router.post('/customer-branch', async (req, res) => {
     const branchCode = await homeBranchOf(cif);
     if (!branchCode) return notFound();
 
-    // Any account of the CIF on No-Debit or frozen: no new account online — the customer goes to the branch
+    // Any account of the CIF on No-Debit, frozen or dormant (Provident Fund aside): no new account
+    // online — the customer goes to the branch
     const restricted = await restrictionOf(cif);
     if (restricted) {
       console.log(`[CustomerBranch] CIF ${cif}: ${restricted.accountStatus} — new account refused online`);
