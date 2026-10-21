@@ -277,6 +277,97 @@ router.post('/set-no-debit', async (req, res) => {
 
 
 
+// ── Existing customers in FlexCube ──────────────────────────────────────────────────────────
+
+/** The home branch of a CIF (STTM_CUSTOMER.LOCAL_BRANCH); '' when there is no such CIF */
+async function homeBranchOf(cif) {
+  const result = await executeQuery(`SELECT LOCAL_BRANCH FROM ${DB_SHEMA}.STTM_CUSTOMER WHERE CUSTOMER_NO = :1`, [cif]);
+  if (!result.success) throw new Error(result.error || 'Customer query failed');
+  return result.data && result.data.length ? String(result.data[0].LOCAL_BRANCH || '').trim() : '';
+}
+
+/**
+ * Accounts of the CIF on No-Debit or frozen (the bank's query) — then no new account online, the
+ * customer goes to the branch. Null when there are none.
+ */
+async function restrictionOf(cif) {
+  const restriction = await executeQuery(
+    `SELECT cust_no,
+            TRIM(CASE WHEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) > 0
+                      THEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) || ' account no debit ' ELSE '' END ||
+                 CASE WHEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) > 0
+                      THEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) || ' account frozen' ELSE '' END) AS account_status,
+            COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) AS no_debit_count,
+            COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) AS frozen_count
+       FROM ${DB_SHEMA}.STTM_CUST_ACCOUNT
+      WHERE cust_no = :1
+        AND (ac_stat_no_dr = 'Y' OR ac_stat_frozen = 'Y')
+      GROUP BY cust_no`,
+    [cif]
+  );
+  if (!restriction.success) throw new Error(restriction.error || 'Account status query failed');
+  const row = restriction.data && restriction.data[0];
+  if (!row) return null;
+  const noDebit = Number(row.NO_DEBIT_COUNT) || 0;
+  const frozen = Number(row.FROZEN_COUNT) || 0;
+  const what = [frozen && 'frozen', noDebit && 'on No-Debit'].filter(Boolean).join(' and ');
+  return {
+    accountStatus: String(row.ACCOUNT_STATUS || '').trim(), noDebitCount: noDebit, frozenCount: frozen,
+    message: `${noDebit + frozen > 1 ? 'Some of your accounts are' : 'One of your accounts is'} ${what}. `
+      + 'Please visit a Zemen Bank branch to continue.',
+  };
+}
+
+/**
+ * CIFs whose national ID is this Fayda UIN (the eKYC psut, sent to FlexCube as NATIONID when a CIF
+ * is created here): the bank's query on STTM_CUST_PERSONAL.P_NATIONAL_ID.
+ */
+async function cifsByNationalId(nationalId) {
+  const result = await executeQuery(
+    `SELECT CUSTOMER_NO FROM ${DB_SHEMA}.STTM_CUST_PERSONAL WHERE P_NATIONAL_ID = :1`, [nationalId]
+  );
+  if (!result.success) throw new Error(result.error || 'National ID query failed');
+  return [...new Set((result.data || []).map(r => String(r.CUSTOMER_NO || '').trim()).filter(Boolean))];
+}
+
+// A Fayda eKYC result this server signed stays usable as long as for /api/fayda/verify-tokens
+const EKYC_TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * POST /api/flexcube/customer-by-fayda — the web app, right after the Fayda OTP of an applicant who
+ * said they have no account: is this person already a customer? The national ID is the Fayda UIN in
+ * the eKYC token this server signed (never one the request names), so only the verified person
+ * learns their own CIF. Body: { ekycToken }
+ *   → { found: false } | { found: true, cif, branchCode } | 409 { found: true, restricted: true, message }
+ */
+router.post('/customer-by-fayda', async (req, res) => {
+  const ekyc = faceResult.verifyPayload(String(req.body?.ekycToken || ''), 'ekyc', EKYC_TOKEN_MAX_AGE_MS);
+  if (!ekyc) return res.status(401).json({ success: false, found: false, message: 'Please verify with your Fayda ID again.' });
+  const nationalId = String(ekyc.uin || '').trim();
+  if (!nationalId) return res.json({ success: true, found: false });
+  try {
+    const cifs = await cifsByNationalId(nationalId);
+    if (!cifs.length) return res.json({ success: true, found: false });
+    if (cifs.length > 1) console.warn(`[CustomerByFayda] National ID has ${cifs.length} CIFs: ${cifs.join(', ')} — using the first with a home branch`);
+    let cif = cifs[0];
+    let branchCode = '';
+    for (const c of cifs) {
+      const home = await homeBranchOf(c);
+      if (home) { cif = c; branchCode = home; break; }
+    }
+    const restricted = await restrictionOf(cif);
+    if (restricted) {
+      console.log(`[CustomerByFayda] CIF ${cif}: ${restricted.accountStatus} — new account refused online`);
+      return res.status(409).json({ success: false, found: true, restricted: true, ...restricted });
+    }
+    console.log(`[CustomerByFayda] Fayda applicant is already CIF ${cif} (home branch ${branchCode || '-'})`);
+    return res.json({ success: true, found: true, cif, branchCode });
+  } catch (error) {
+    console.error('[CustomerByFayda] Error:', error.message || error);
+    return res.status(503).json({ success: false, found: false, message: 'We could not check our records right now.' });
+  }
+});
+
 /**
  * POST /api/flexcube/customer-branch — the web app, when an existing customer gives their CIF (or
  * account number): their home branch, where the new account is opened.
@@ -303,39 +394,14 @@ router.post('/customer-branch', async (req, res) => {
       if (!acc.data || !acc.data.length || String(acc.data[0].CUST_NO || '').trim() !== cif) return notFound();
     }
 
-    const result = await executeQuery(`SELECT LOCAL_BRANCH FROM ${DB_SHEMA}.STTM_CUSTOMER WHERE CUSTOMER_NO = :1`, [cif]);
-    if (!result.success) throw new Error(result.error || 'Customer query failed');
-    const branchCode = result.data && result.data.length ? String(result.data[0].LOCAL_BRANCH || '').trim() : '';
+    const branchCode = await homeBranchOf(cif);
     if (!branchCode) return notFound();
 
     // Any account of the CIF on No-Debit or frozen: no new account online — the customer goes to the branch
-    const restriction = await executeQuery(
-      `SELECT cust_no,
-              TRIM(CASE WHEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) > 0
-                        THEN COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) || ' account no debit ' ELSE '' END ||
-                   CASE WHEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) > 0
-                        THEN COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) || ' account frozen' ELSE '' END) AS account_status,
-              COUNT(CASE WHEN ac_stat_no_dr = 'Y' THEN 1 END) AS no_debit_count,
-              COUNT(CASE WHEN ac_stat_frozen = 'Y' THEN 1 END) AS frozen_count
-         FROM ${DB_SHEMA}.STTM_CUST_ACCOUNT
-        WHERE cust_no = :1
-          AND (ac_stat_no_dr = 'Y' OR ac_stat_frozen = 'Y')
-        GROUP BY cust_no`,
-      [cif]
-    );
-    if (!restriction.success) throw new Error(restriction.error || 'Account status query failed');
-    const row = restriction.data && restriction.data[0];
-    if (row) {
-      const noDebit = Number(row.NO_DEBIT_COUNT) || 0;
-      const frozen = Number(row.FROZEN_COUNT) || 0;
-      const what = [frozen && 'frozen', noDebit && 'on No-Debit'].filter(Boolean).join(' and ');
-      console.log(`[CustomerBranch] CIF ${cif}: ${row.ACCOUNT_STATUS} — new account refused online`);
-      return res.status(409).json({
-        success: false, found: true, restricted: true, branchCode,
-        accountStatus: String(row.ACCOUNT_STATUS || '').trim(), noDebitCount: noDebit, frozenCount: frozen,
-        message: `${noDebit + frozen > 1 ? 'Some of your accounts are' : 'One of your accounts is'} ${what}. `
-          + 'Please visit a Zemen Bank branch to continue.',
-      });
+    const restricted = await restrictionOf(cif);
+    if (restricted) {
+      console.log(`[CustomerBranch] CIF ${cif}: ${restricted.accountStatus} — new account refused online`);
+      return res.status(409).json({ success: false, found: true, restricted: true, branchCode, ...restricted });
     }
 
     console.log(`[CustomerBranch] CIF ${cif} → home branch ${branchCode}`);
@@ -649,6 +715,26 @@ if (req.body.dateOfBirth) {
         success: false,
         message: 'Full name or first name and last name are required'
       });
+    }
+
+    // Web applicant who said they have no account but whose Fayda national ID already has a CIF: no
+    // second CIF. The web app checks this right after the OTP and offers to open the account under
+    // the existing CIF; this catches it when that check could not run. FlexCube unreachable: go on.
+    const isExisting = customerData.existingCustomer || customerData.existingCif || customerData.existingAccountNumber;
+    const nationalId = String(customerData.uin || '').trim();
+    if (customerData.channel === 'web' && !isExisting && nationalId) {
+      try {
+        const cifs = await cifsByNationalId(nationalId);
+        if (cifs.length) {
+          console.log(`[CreateCustomer] "New" web applicant is already CIF ${cifs.join(', ')} — refused, offered to use it`);
+          return res.status(409).json({
+            success: false, code: 'EXISTING_CUSTOMER',
+            message: 'You already have an account with Zemen Bank. You can open another account under your existing customer profile.',
+          });
+        }
+      } catch (e) {
+        console.warn('[CreateCustomer] Could not check the national ID in FlexCube:', e.message || e);
+      }
     }
 
     // Prepare data for Customer Onboarding API - pass ALL fields from mobile app
