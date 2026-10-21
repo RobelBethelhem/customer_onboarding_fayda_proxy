@@ -4,6 +4,7 @@ const axios = require('axios');
 const { executeQuery } = require('../lib/oracleDb');
 const { forwardedForHeader } = require('../lib/clientIp');
 const faceResult = require('../lib/faceResult');
+const { isForeignNational } = require('../lib/nationality');
 
 const DB_SHEMA = process.env.FLEXCUBE_DB_SCHEMA || 'FCUBSPRD';
 
@@ -623,13 +624,24 @@ router.post('/update-customer', async (req, res) => {
 const CUSTOMER_ONBOARDING_API = 'http://localhost:3500/';
 
 // Create new customer - checks workflow settings first
+/**
+ * An applicant's nationality: the one in the eKYC result this server signed (Fayda) when the web app
+ * sends it, so a foreign national cannot leave out the passport by changing what the browser sends.
+ */
+function applicantNationality(data) {
+  let nationality = String(data.nationality || '').trim().slice(0, 60);
+  const ekyc = data.ekycToken ? faceResult.verifyPayload(String(data.ekycToken), 'ekyc', EKYC_TOKEN_MAX_AGE_MS) : null;
+  const uin = String(data.uin || '').trim();
+  if (ekyc && typeof ekyc.nat === 'string' && (!ekyc.uin || ekyc.uin === uin)) nationality = ekyc.nat;
+  return nationality;
+}
+
 router.post('/create-customer', async (req, res) => {
   try {
 
 
    req.body.faydaId  =  req.body.uin;
 
-    console.log("yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", req.body)
     const customerData = req.body;
 
     if(req.body.monthlyIncome < 1000){
@@ -754,6 +766,8 @@ if (req.body.dateOfBirth) {
       }
     }
 
+    const nationality = applicantNationality(customerData);
+
     // Prepare data for Customer Onboarding API - pass ALL fields from mobile app
     const onboardingData = {
       fullName: customerData.fullName || [customerData.firstName, customerData.middleName, customerData.lastName].filter(Boolean).join(' '),
@@ -821,6 +835,13 @@ if (req.body.dateOfBirth) {
       existingCustomer: !!customerData.existingCustomer,
       existingCif: customerData.existingCif || '',
       existingAccountNumber: customerData.existingAccountNumber || '',
+      // Foreign national (Fayda nationality other than Ethiopia): passport plus a work permit or
+      // Origin ID, uploaded to the dashboard beforehand as { type, fileId, fileKey }; it checks them
+      nationality,
+      foreignDocuments: (Array.isArray(customerData.foreignDocuments) ? customerData.foreignDocuments : [])
+        .slice(0, 6)
+        .filter(d => d && typeof d.type === 'string' && typeof d.fileId === 'string')
+        .map(d => ({ type: d.type.slice(0, 20), fileId: d.fileId.slice(0, 64), fileKey: String(d.fileKey || '').slice(0, 100) })),
       // Additional services (Mobile Banking, Debit Card …) — set up by the branch Personal Banker after approval
       requestedServices: Array.isArray(customerData.requestedServices) ? customerData.requestedServices : [],
       // Terms and conditions of those services the customer accepted: [{ id, version, acceptedAt }]
@@ -878,7 +899,6 @@ if (req.body.dateOfBirth) {
     });
 
 
-    console.log("88888888888888888888888888888888888888888888888888888888888888888888888888888888888888",onboardingResponse)
 
     const onboardingResult = onboardingResponse.data;
 
@@ -925,13 +945,17 @@ if (req.body.dateOfBirth) {
       return res.status(error.response.status).json({
         success: false,
         message: error.response.data?.error || 'Application could not be submitted',
+        // e.g. FOREIGN_DOCUMENTS + the upload to do again
+        ...(error.response.data?.code ? { code: error.response.data.code } : {}),
+        ...(error.response.data?.fileId ? { fileId: error.response.data.fileId } : {}),
       });
     }
 
     // If Customer Onboarding API is not available, fall back to direct FlexCube
     if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-      // Never for an existing customer — the fallback would create them a second CIF
-      if (req.body.existingCustomer || req.body.existingCif || req.body.existingAccountNumber) {
+      // Never for an existing customer — the fallback would create them a second CIF — nor for a
+      // foreign national, whose passport and work permit / Origin ID KYC must check first
+      if (req.body.existingCustomer || req.body.existingCif || req.body.existingAccountNumber || isForeignNational(applicantNationality(req.body))) {
         return res.status(503).json({
           success: false,
           message: 'Account opening is temporarily unavailable. Please try again shortly.',

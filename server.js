@@ -283,6 +283,7 @@ const corporateRoutes = require('./routes/corporate');
 const { globalRateLimit, trustProxySetting } = require('./middleware/rateLimit');
 const { forwardedForHeader } = require('./lib/clientIp');
 const faceResult = require('./lib/faceResult');
+const { nationalityOf } = require('./lib/nationality');
 const livenessService = require('./services/livenessService');
 require('dotenv').config();
 
@@ -316,6 +317,7 @@ const faydaClient = IdaClientFactory.createClient(faydaConfig);
 
 // In-memory transactionID store: individualId → { transactionID, createdAt }
 const txnStore = new Map();
+const TXN_MAX_AGE_MS = 30 * 60 * 1000; // an OTP is long expired by then
 
 // Database connections are initialized in startServer() below
 
@@ -428,6 +430,9 @@ console.log('ida.certificate.url =', faydaConfig['ida.certificate.url']);
       transactionID,
       createdAt: Date.now(),
     });
+    for (const [id, txn] of txnStore) {
+      if (Date.now() - txn.createdAt > TXN_MAX_AGE_MS) txnStore.delete(id);
+    }
 
     res.json({
       success: true,
@@ -482,6 +487,9 @@ console.log('ida.certificate.url =', faydaConfig['ida.certificate.url']);
 
 
 
+// The attribute names Fayda returns (never their values), once per start
+let ekycAttributesLogged = false;
+
 app.post('/api/fayda/ekyc', async (req, res) => {
   try {
     const { individualId, otp } = req.body;
@@ -509,6 +517,15 @@ app.post('/api/fayda/ekyc', async (req, res) => {
       ekycRes.identity.photo = await convertPhotoToJpeg(ekycRes.identity.photo);
     }
 
+    // Nationality from Fayda: a foreign national uploads a passport and a work permit or Origin ID
+    if (ekycRes?.identity) {
+      ekycRes.nationality = nationalityOf(ekycRes.identity);
+      if (!ekycAttributesLogged) {
+        ekycAttributesLogged = true;
+        console.log(`[Fayda] eKYC attributes: ${Object.keys(ekycRes.identity).join(', ')}`);
+      }
+    }
+
     // Signed copy of the identity for business account applications: the dashboard asks this
     // server (POST /api/fayda/verify-tokens) whether the data really came from Fayda
     if (ekycRes?.identity) {
@@ -526,6 +543,7 @@ app.post('/api/fayda/ekyc', async (req, res) => {
         region: id.region_eng || '',
         zone: id.zone_eng || '',
         woreda: id.woreda_eng || '',
+        nat: ekycRes.nationality || '',
         ph: faceResult.hash(id.photo || ''),
       });
     }
