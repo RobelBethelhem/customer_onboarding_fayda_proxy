@@ -619,7 +619,8 @@ app.get('/api/health', (req, res) => {
 });
 
 // Start server — await database connections before accepting requests
-const HOST = '0.0.0.0';
+// HOST=127.0.0.1 keeps the port off the network (only the gateway on this server can reach it)
+const HOST = process.env.HOST || '0.0.0.0';
 
 async function startServer() {
   // 1. Connect to MongoDB

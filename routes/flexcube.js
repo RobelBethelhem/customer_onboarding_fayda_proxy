@@ -617,11 +617,8 @@ router.post('/update-customer', async (req, res) => {
   }
 });
 
-// Customer Onboarding Dashboard API URL
-//sconst CUSTOMER_ONBOARDING_API = process.env.CUSTOMER_ONBOARDING_API || 'http://localhost:3500/akal';
-
-
-const CUSTOMER_ONBOARDING_API = 'http://localhost:3500/';
+// Customer Onboarding Dashboard API URL (the dashboard on this server unless set)
+const CUSTOMER_ONBOARDING_API = (process.env.CUSTOMER_ONBOARDING_API || 'http://localhost:3500').replace(/\/+$/, '');
 
 // Create new customer - checks workflow settings first
 /**

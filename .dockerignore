@@ -1,0 +1,14 @@
+# Secrets and data: mounted or set when the container runs, never in the image
+.env
+.env.*
+keys
+uploads
+.face-result-secret
+
+node_modules
+.git
+logs
+*.log
+*.bat
+antispoof
+__pycache__
